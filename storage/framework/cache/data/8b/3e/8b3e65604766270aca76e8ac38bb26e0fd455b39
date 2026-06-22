@@ -1,0 +1,4 @@
+1777016340s:609:"- Cập nhật danh sách mail: B1: Vào sheet update danh sách mail
+B2: Vào danh sách cơ sở nhấn vào danh sách Danh sách email > Sửa danh sách email > Đồng bộ từ sheet
+- Gửi mail tính lương: B1: Cập nhật danh sách email > File theo cơ sở > Ấn nút Upload file > Chọn file Google Sheets  > Ấn Upload file 
+B2: Chỉnh sửa File Lương > Kiểm tra PDF (thử người đầu, người cuối, người giữa) > Tạo nhiều file PDF theo danh sách > Đợi 3 4p > Lịch sử xuất PDF hàng loạt > Gửi Email (Gửi 30 người 1 lúc thôi không nó hẹo)";
