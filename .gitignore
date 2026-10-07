@@ -28,3 +28,6 @@ storage/app/private/salary-bulk/
 # GCP credentials
 gcs-key.json
 setup-info.txt
+
+# Local Google service-account credentials (never commit)
+storage/app/google/service-account.json

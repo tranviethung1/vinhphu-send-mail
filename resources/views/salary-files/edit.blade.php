@@ -621,7 +621,7 @@
                 formData.append('_token', document.querySelector('input[name="_token"]').value);
                 formData.append('sheet_url', sheetUrl);
 
-                fetch('{{ route("salary-files.sync-from-sheet", $file->id) }}', {
+                fetch('{{ route("salary-files.sync-from-sheet", $file->id, false) }}', {
                     method: 'POST',
                     body: formData,
                     headers: {
@@ -846,7 +846,7 @@
         // Gọi API sau khi page đã render (không block UI), lặp lại với thời gian giãn cách tăng dần, tối đa 10 lần
         function checkDriveChanges() {
             pollCount++;
-            fetch('{{ route("salary-files.check-drive-changes", $file->id) }}', {
+            fetch('{{ route("salary-files.check-drive-changes", $file->id, false) }}', {
                 headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
             })
             .then(res => res.ok ? res.json() : null)

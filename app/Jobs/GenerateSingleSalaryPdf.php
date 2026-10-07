@@ -26,16 +26,17 @@ class GenerateSingleSalaryPdf implements ShouldQueue
 
     public SalaryFile $file;
     public TemplateSelection $template;
-    public int $rowNumber;
+    /** @var int[] */
+    public array $rowNumbers;
     public string $tempBatchId; // Dùng tên khác để tránh conflict với Batchable trait
 
     public $timeout = 300;
 
-    public function __construct(SalaryFile $file, TemplateSelection $template, int $rowNumber, string $tempBatchId)
+    public function __construct(SalaryFile $file, TemplateSelection $template, array $rowNumbers, string $tempBatchId)
     {
         $this->file = $file;
         $this->template = $template;
-        $this->rowNumber = $rowNumber;
+        $this->rowNumbers = array_values(array_unique(array_map('intval', $rowNumbers)));
         $this->tempBatchId = $tempBatchId;
     }
 
@@ -64,49 +65,135 @@ class GenerateSingleSalaryPdf implements ShouldQueue
 
     public function handle(): void
     {
-        $file = $this->file;
-        $template = $this->template;
-        $rowNumber = (int)$this->rowNumber;
-        
-        if ($rowNumber < 2) {
-            $rowNumber = 2;
+        set_time_limit((int) $this->timeout);
+        ini_set('max_execution_time', (string) $this->timeout);
+
+        if ($this->rowNumbers === []) {
+            return;
         }
 
-        // Load salary sheet
-        $salarySheet = null;
+        $file = $this->file;
+        $template = $this->template;
+
+        $salarySheet = $this->loadSalarySheet($file);
+        $fullTemplatePath = $this->resolveTemplatePath($template);
+        if ($fullTemplatePath === null) {
+            return;
+        }
+
+        $selections = is_array($template->selections ?? null) ? $template->selections : [];
+        $tempDir = 'salary-bulk-temp/' . $this->tempBatchId;
+        $storageDisk = $this->getStorageDisk();
+        if (!$storageDisk->exists($tempDir)) {
+            $storageDisk->makeDirectory($tempDir);
+        }
+
+        foreach ($this->rowNumbers as $rowNumber) {
+            $this->processRow(
+                $file,
+                $template,
+                max(2, (int) $rowNumber),
+                $salarySheet,
+                $fullTemplatePath,
+                $selections,
+                $tempDir,
+                $storageDisk
+            );
+        }
+    }
+
+    private function loadSalarySheet(SalaryFile $file)
+    {
         $pathToRead = $file->salary_sheet_path ?? $file->file_path;
         $disk = $this->getStorageDisk();
         $normalizedPath = $this->normalizeFilePath($pathToRead);
-        
-        if (!empty($pathToRead) && $disk->exists($normalizedPath)) {
-            $diskName = env('FILESYSTEM_DISK', 'local');
-            if ($diskName === 'local') {
-                try {
-                    $fullSalaryPath = $disk->path($normalizedPath);
-                } catch (\Exception $e) {
-                    $fileContent = $disk->get($normalizedPath);
-                    $tempFile = tempnam(sys_get_temp_dir(), 'salary_');
-                    file_put_contents($tempFile, $fileContent);
-                    $fullSalaryPath = $tempFile;
-                }
-            } else {
+
+        if (empty($pathToRead) || !$disk->exists($normalizedPath)) {
+            return null;
+        }
+
+        $diskName = env('FILESYSTEM_DISK', 'local');
+        if ($diskName === 'local') {
+            try {
+                $fullSalaryPath = $disk->path($normalizedPath);
+            } catch (\Exception $e) {
                 $fileContent = $disk->get($normalizedPath);
                 $tempFile = tempnam(sys_get_temp_dir(), 'salary_');
                 file_put_contents($tempFile, $fileContent);
                 $fullSalaryPath = $tempFile;
             }
-            $salarySpreadsheet = IOFactory::load($fullSalaryPath);
-            
-            if ($file->salary_sheet_path) {
-                $salarySheet = $salarySpreadsheet->getActiveSheet();
-            } else {
-                $salarySheet = $salarySpreadsheet->getSheetByName('Bảng lương') 
-                    ?? $salarySpreadsheet->getSheetByName('Bảng Lương')
-                    ?? $salarySpreadsheet->getSheet(0);
+        } else {
+            $fileContent = $disk->get($normalizedPath);
+            $tempFile = tempnam(sys_get_temp_dir(), 'salary_');
+            file_put_contents($tempFile, $fileContent);
+            $fullSalaryPath = $tempFile;
+        }
+
+        $salarySpreadsheet = IOFactory::load($fullSalaryPath);
+
+        if ($file->salary_sheet_path) {
+            return $salarySpreadsheet->getActiveSheet();
+        }
+
+        return $salarySpreadsheet->getSheetByName('Bảng lương')
+            ?? $salarySpreadsheet->getSheetByName('Bảng Lương')
+            ?? $salarySpreadsheet->getSheet(0);
+    }
+
+    private function resolveTemplatePath(TemplateSelection $template): ?string
+    {
+        $templatePath = 'templates/' . $template->file_name;
+        $templateDisk = $this->getStorageDisk();
+        $diskName = env('FILESYSTEM_DISK', 'local');
+
+        $existsOnCurrentDisk = $templateDisk->exists($templatePath);
+        $existsOnLocalDisk = false;
+        if ($diskName !== 'local') {
+            $existsOnLocalDisk = Storage::disk('local')->exists($templatePath);
+        }
+
+        if (!$existsOnCurrentDisk && !$existsOnLocalDisk) {
+            Log::error('GenerateSingleSalaryPdf - template file not found', [
+                'salary_file_id' => $this->file->id,
+                'template_id' => $template->id,
+                'path' => $templatePath,
+            ]);
+            return null;
+        }
+
+        if (!$existsOnCurrentDisk && $existsOnLocalDisk) {
+            $templateDisk = Storage::disk('local');
+            $diskName = 'local';
+        }
+
+        if ($diskName === 'local') {
+            try {
+                return $templateDisk->path($templatePath);
+            } catch (\Exception $e) {
+                $fileContent = $templateDisk->get($templatePath);
+                $tempFile = tempnam(sys_get_temp_dir(), 'template_');
+                file_put_contents($tempFile, $fileContent);
+                return $tempFile;
             }
         }
 
-        // Validate row: lấy STT từ cột A; nếu cột A trống/merge thì dùng fallback = rowNumber - 1 (row 2 = stt 1)
+        $fileContent = $templateDisk->get($templatePath);
+        $tempFile = tempnam(sys_get_temp_dir(), 'template_');
+        file_put_contents($tempFile, $fileContent);
+
+        return $tempFile;
+    }
+
+    private function processRow(
+        SalaryFile $file,
+        TemplateSelection $template,
+        int $rowNumber,
+        $salarySheet,
+        string $fullTemplatePath,
+        array $selections,
+        string $tempDir,
+        $storageDisk
+    ): void {
         $employeeName = $salarySheet ? $this->getEmployeeNameFromSalarySheet($salarySheet, $rowNumber) : '';
         if ($employeeName === '' || $this->isHeaderRow($employeeName)) {
             Log::debug('GenerateSingleSalaryPdf - skipped invalid row', [
@@ -119,74 +206,19 @@ class GenerateSingleSalaryPdf implements ShouldQueue
 
         $stt = $salarySheet ? $this->getSttFromSalarySheet($salarySheet, $rowNumber) : 0;
         if ($stt <= 0) {
-            // Cột A trống/merge hoặc không phải số → dùng thứ tự theo dòng Excel (row 2 = stt 1)
             $stt = $rowNumber - 1;
         }
 
-        // Load template
-        $templatePath = 'templates/' . $template->file_name;
-        $templateDisk = $this->getStorageDisk();
-        $diskName = env('FILESYSTEM_DISK', 'local');
-        
-        // Check template exists
-        $existsOnCurrentDisk = $templateDisk->exists($templatePath);
-        $existsOnLocalDisk = false;
-        if ($diskName !== 'local') {
-            $localDisk = Storage::disk('local');
-            $existsOnLocalDisk = $localDisk->exists($templatePath);
-        }
-        
-        if (!$existsOnCurrentDisk && !$existsOnLocalDisk) {
-            Log::error('GenerateSingleSalaryPdf - template file not found', [
-                'salary_file_id' => $file->id,
-                'template_id' => $template->id,
-                'path' => $templatePath,
-            ]);
-            return;
-        }
-        
-        if (!$existsOnCurrentDisk && $existsOnLocalDisk) {
-            $templateDisk = Storage::disk('local');
-            $diskName = 'local';
-        }
-        
-        if ($diskName === 'local') {
-            try {
-                $fullTemplatePath = $templateDisk->path($templatePath);
-            } catch (\Exception $e) {
-                $fileContent = $templateDisk->get($templatePath);
-                $tempFile = tempnam(sys_get_temp_dir(), 'template_');
-                file_put_contents($tempFile, $fileContent);
-                $fullTemplatePath = $tempFile;
-            }
-        } else {
-            $fileContent = $templateDisk->get($templatePath);
-            $tempFile = tempnam(sys_get_temp_dir(), 'template_');
-            file_put_contents($tempFile, $fileContent);
-            $fullTemplatePath = $tempFile;
-        }
-        
-        $selections = is_array($template->selections ?? null) ? $template->selections : [];
-        
-        // Generate PDF
         $pdfContent = $this->generatePdfContentForRow($file, $template, $rowNumber, $salarySheet, $fullTemplatePath, $selections);
-        
-        // Tạo tên file
-        $sttFormatted = str_pad((string)$stt, 3, '0', STR_PAD_LEFT);
+
+        $sttFormatted = str_pad((string) $stt, 3, '0', STR_PAD_LEFT);
         $normalizedName = Str::slug($employeeName, '_');
         $fileName = $sttFormatted . '.' . $normalizedName . '.pdf';
         $safeName = $this->sanitizeFilename($fileName);
-        
-        // Lưu PDF vào storage tạm (theo tempBatchId)
-        $tempDir = 'salary-bulk-temp/' . $this->tempBatchId;
-        $storageDisk = $this->getStorageDisk();
-        if (!$storageDisk->exists($tempDir)) {
-            $storageDisk->makeDirectory($tempDir);
-        }
-        
+
         $tempPath = $tempDir . '/' . $safeName;
         $storageDisk->put($tempPath, $pdfContent);
-        
+
         Log::debug('GenerateSingleSalaryPdf - created PDF', [
             'salary_file_id' => $file->id,
             'row' => $rowNumber,

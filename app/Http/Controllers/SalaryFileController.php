@@ -7,10 +7,9 @@ use App\Models\TemplateSelection;
 use App\Models\SalaryBulkExport;
 use App\Models\Facility;
 use App\Models\MailList;
-use App\Jobs\GenerateSingleSalaryPdf;
 use App\Jobs\MergeBulkSalaryPdfs;
 use App\Jobs\SendBulkExportMails;
-use Illuminate\Support\Facades\Bus;
+use App\Jobs\StartBulkSalaryPdfBatch;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Google\Client as GoogleClient;
@@ -838,49 +837,8 @@ class SalaryFileController extends Controller
         
         $bulkExportId = $bulkExport->id;
 
-        // Chia rows thành chunks (10 rows/chunk để xử lý song song)
-        $chunkSize = 10;
-        $chunks = array_chunk($rows, $chunkSize);
-        $jobs = [];
-        
-        // Tạo job cho mỗi row
-        foreach ($rows as $row) {
-            $jobs[] = new GenerateSingleSalaryPdf($file, $template, $row, $batchId);
-        }
-        
-        // Dispatch batch với callback để merge khi hoàn thành
-        $batch = Bus::batch($jobs)
-            ->name("Generate PDFs for Salary File #{$file->id}")
-            ->allowFailures()
-            ->then(function () use ($file, $template, $rows, $batchId, $bulkExportId) {
-                // Khi tất cả jobs hoàn thành, dispatch job merge
-                MergeBulkSalaryPdfs::dispatch($file, $template, $rows, $batchId, $bulkExportId);
-            })
-            ->catch(function (\Throwable $e) use ($file, $batchId, $bulkExportId) {
-                Log::error('Batch failed for Generate PDFs', [
-                    'salary_file_id' => $file->id,
-                    'batch_id' => $batchId,
-                    'error' => $e->getMessage(),
-                ]);
-                SalaryBulkExport::where('id', $bulkExportId)->update(['status' => 'fail']);
-            })
-            ->finally(function () use ($file, $batchId) {
-                Log::info('Batch finished for Generate PDFs', [
-                    'salary_file_id' => $file->id,
-                    'batch_id' => $batchId,
-                ]);
-            })
-            ->dispatch();
-        
-        Log::info('Đã dispatch batch job tạo PDF hàng loạt', [
-            'salary_file_id' => $file->id,
-            'template_id' => $template->id,
-            'total_rows' => count($rows),
-            'total_jobs' => count($jobs),
-            'batch_id' => $batch->id,
-            'batch_uuid' => $batchId,
-            'rows_sample' => array_slice($rows, 0, 5),
-        ]);
+        StartBulkSalaryPdfBatch::dispatch($file, $template, $rows, $batchId, $bulkExportId)
+            ->afterResponse();
 
         return redirect()
             ->back()
@@ -929,7 +887,8 @@ class SalaryFileController extends Controller
                 $payload = json_decode($job->payload, true);
                 if (isset($payload['data']['commandName'])) {
                     if (str_contains($payload['data']['commandName'], 'MergeBulkSalaryPdfs') ||
-                        str_contains($payload['data']['commandName'], 'GenerateSingleSalaryPdf')) {
+                        str_contains($payload['data']['commandName'], 'GenerateSingleSalaryPdf') ||
+                        str_contains($payload['data']['commandName'], 'StartBulkSalaryPdfBatch')) {
                         $command = unserialize($payload['data']['command']);
                         if (isset($command->file) && $command->file->id == $fileId) {
                             $pendingJobs[] = [
@@ -969,7 +928,8 @@ class SalaryFileController extends Controller
                     $payload = json_decode($job->payload, true);
                     if (isset($payload['data']['commandName']) &&
                         (str_contains($payload['data']['commandName'], 'MergeBulkSalaryPdfs') ||
-                         str_contains($payload['data']['commandName'], 'GenerateSingleSalaryPdf'))) {
+                         str_contains($payload['data']['commandName'], 'GenerateSingleSalaryPdf') ||
+                         str_contains($payload['data']['commandName'], 'StartBulkSalaryPdfBatch'))) {
                         $command = unserialize($payload['data']['command']);
                         if (isset($command->file) && $command->file->id == $fileId) {
                             return [
