@@ -31,3 +31,6 @@ setup-info.txt
 
 # Local Google service-account credentials (never commit)
 storage/app/google/service-account.json
+
+# Runtime log file
+storage/logs/laravel.log
