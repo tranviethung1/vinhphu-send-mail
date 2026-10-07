@@ -644,7 +644,7 @@ unset($__errorArgs, $__bag); ?>
                 formData.append('_token', document.querySelector('input[name="_token"]').value);
                 formData.append('sheet_url', sheetUrl);
 
-                fetch('<?php echo e(route("salary-files.sync-from-sheet", $file->id)); ?>', {
+                fetch('<?php echo e(route("salary-files.sync-from-sheet", $file->id, false)); ?>', {
                     method: 'POST',
                     body: formData,
                     headers: {
@@ -869,7 +869,7 @@ unset($__errorArgs, $__bag); ?>
         // Gọi API sau khi page đã render (không block UI), lặp lại với thời gian giãn cách tăng dần, tối đa 10 lần
         function checkDriveChanges() {
             pollCount++;
-            fetch('<?php echo e(route("salary-files.check-drive-changes", $file->id)); ?>', {
+            fetch('<?php echo e(route("salary-files.check-drive-changes", $file->id, false)); ?>', {
                 headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
             })
             .then(res => res.ok ? res.json() : null)

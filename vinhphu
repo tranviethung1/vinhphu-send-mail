@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+COMPOSE_CMD=(docker compose)
+APP_SERVICE="app"
+MYSQL_SERVICE="mysql"
+QUEUE_SERVICE="queue"
+DEFAULT_QUEUE_WORKERS=6
+
+log() {
+  printf '\n[%s] %s\n' "vinhphu" "$1"
+}
+
+run_in_app() {
+  "${COMPOSE_CMD[@]}" exec -T "$APP_SERVICE" sh -lc "$1"
+}
+
+wait_for_service() {
+  local service="$1"
+  local max_attempts="${2:-30}"
+  local attempt=1
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if "${COMPOSE_CMD[@]}" ps --status running "$service" | grep -q "$service"; then
+      return 0
+    fi
+
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+ensure_env_file() {
+  if [ ! -f .env ] && [ -f .env.example ]; then
+    log "Copying .env from .env.example"
+    cp .env.example .env
+  fi
+}
+
+queue_worker_count() {
+  local workers="$DEFAULT_QUEUE_WORKERS"
+
+  if [ -f .env ] && grep -q '^QUEUE_WORKERS=' .env; then
+    workers="$(grep '^QUEUE_WORKERS=' .env | cut -d= -f2- | tr -d ' "'\''')"
+  fi
+
+  if ! [[ "$workers" =~ ^[0-9]+$ ]] || [ "$workers" -lt 1 ]; then
+    workers="$DEFAULT_QUEUE_WORKERS"
+  fi
+
+  echo "$workers"
+}
+
+start_stack() {
+  ensure_env_file
+
+  local queue_workers
+  queue_workers="$(queue_worker_count)"
+
+  log "Starting Docker services with ${queue_workers} queue workers"
+  "${COMPOSE_CMD[@]}" up -d --scale "${QUEUE_SERVICE}=${queue_workers}"
+
+  log "Waiting for app container"
+  wait_for_service "$APP_SERVICE" 30 || {
+    log "App container did not become ready in time"
+    exit 1
+  }
+
+  log "Waiting for MySQL container"
+  wait_for_service "$MYSQL_SERVICE" 30 || {
+    log "MySQL container did not become ready in time"
+    exit 1
+  }
+
+  log "Fixing writable directories"
+  run_in_app 'mkdir -p storage/logs bootstrap/cache storage/framework/{cache,sessions,testing,views} && chmod -R ug+rw storage bootstrap/cache || true'
+
+  log "Installing Composer dependencies if needed"
+  run_in_app 'if [ ! -f vendor/autoload.php ]; then composer install --no-interaction; else echo "Composer dependencies already installed"; fi'
+
+  log "Generating app key if missing"
+  run_in_app 'if ! grep -q "^APP_KEY=base64:" .env; then php artisan key:generate --force --no-interaction; else echo "APP_KEY already present"; fi'
+
+  log "Caching configuration"
+  run_in_app 'php artisan optimize:clear && php artisan config:clear && php artisan route:clear && php artisan view:clear'
+
+  log "Running migrations"
+  run_in_app 'php artisan migrate --force --no-interaction || true'
+
+  log "Creating storage symlink if needed"
+  run_in_app 'php artisan storage:link || true'
+
+  log "Startup complete"
+  "${COMPOSE_CMD[@]}" ps
+}
+
+case "${1:-}" in
+  start)
+    start_stack
+    ;;
+  stop)
+    log "Stopping Docker services"
+    "${COMPOSE_CMD[@]}" down
+    ;;
+  restart)
+    log "Restarting Docker services"
+    "${COMPOSE_CMD[@]}" down
+    start_stack
+    ;;
+  logs)
+    "${COMPOSE_CMD[@]}" logs -f
+    ;;
+  shell)
+    "${COMPOSE_CMD[@]}" exec "$APP_SERVICE" sh
+    ;;
+  *)
+    cat <<'EOF'
+Usage: ./vinhphu <command>
+
+Commands:
+  start    Start all services and run setup tasks
+  stop     Stop all services
+  restart  Restart all services and rerun setup tasks
+  logs     Follow Docker logs
+  shell    Open a shell in the app container
+EOF
+    exit 1
+    ;;
+esac
